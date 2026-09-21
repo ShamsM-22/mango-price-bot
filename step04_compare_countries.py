@@ -6076,6 +6076,13 @@ def scrape_country(
         )
 
         if not product_available:
+            print(f"DEBUG {country_code} HTTP: {status_code}", flush=True)
+            print(f"DEBUG {country_code} URL: {final_url}", flush=True)
+            print(f"DEBUG {country_code} TITLE: {page.title()}", flush=True)
+            print(f"DEBUG {country_code} BODY: {body_text[:1500]!r}", flush=True)
+
+
+            
             return empty_result(
                 country_code=country_code,
                 country_name=country_name,
