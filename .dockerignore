@@ -1,0 +1,16 @@
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.*
+.git
+.gitignore
+.vscode
+data/cargo_debug
+data/telegram_bot_errors.log
+*.png
+*.jpg
+*.jpeg
