@@ -42,10 +42,10 @@ LAST_SIZE_FILE = (
     / "last_requested_size.txt"
 )
 
-HEADLESS = True
+HEADLESS = False
 
 SCRIPT_VERSION = (
-    "2026-09-21-CLOUD-STARTUP-V21"
+    "2026-09-22-DELIVERY-NOTE-FILTER-V24"
 )
 
 
@@ -2269,6 +2269,25 @@ def parse_trusted_structural_size_label(
         " ",
         clean_value,
     ).strip()
+
+    # Mango ölçü düyməsində ölçünün altında çatdırılma qeydi də
+    # göstərə bilər. Müqayisəyə yalnız ölçünün özü daxil edilməlidir.
+    # Məsələn:
+    # "M Kargoya teslimat tahmini 22 iş günüdür" -> "M"
+    delivery_note_match = re.search(
+        r"(?:^|\s+)(?:"
+        r"kargoya\s+teslimat\s+tahmini|"
+        r"estimated\s+delivery|"
+        r"entrega\s+estimada"
+        r")\b",
+        clean_value,
+        flags=re.IGNORECASE,
+    )
+
+    if delivery_note_match:
+        clean_value = clean_value[
+            :delivery_note_match.start()
+        ].strip()
 
     if (
         not clean_value
@@ -5130,7 +5149,11 @@ def get_size_options(
         )
     )
 
-    if structural_dom_options:
+    # Bəzi Mango səhifələrində ilk DOM qrupu yalnız ilk ölçünü
+    # (məsələn, XS) qaytarır. Bir elementlik siyahını tam nəticə
+    # saymırıq; server HTML və səhifə mətnindəki tam siyahını da
+    # yoxlayırıq.
+    if len(structural_dom_options) >= 2:
         print(
             f"{country_code} ölçüləri "
             "(STRUCTURAL DOM V16): "
@@ -5160,7 +5183,7 @@ def get_size_options(
             f"uğursuz oldu: {error}"
         )
 
-    if direct_options:
+    if len(direct_options) >= 2:
         print(
             f"{country_code} ölçüləri "
             "(birbaşa Mango HTML): "

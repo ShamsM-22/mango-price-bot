@@ -869,16 +869,9 @@ def build_result_message(
         if size_status == "No":
 
             lines.append(
-                "   Uyğun ölçü: "
+                f"   {requested_size} ölçüsü bu ölkədə "
                 "mövcud deyil ❌"
             )
-
-            if available_sizes:
-
-                lines.append(
-                    f"   Stokdakı lokal ölçülər: "
-                    f"{available_sizes}"
-                )
 
             lines.append(
                 "   Qiymət müqayisəsinə "
@@ -889,27 +882,20 @@ def build_result_message(
 
         if size_status == "Unknown":
 
-            lines.append(
-                "   Uyğun ölçü: "
-                "dəqiq yoxlanmadı ⚠️"
-            )
-
-            if available_sizes:
-
+            if size_match_method == "unknown":
                 lines.append(
-                    f"   Oxunan lokal ölçülər: "
-                    f"{available_sizes}"
+                    f"   {requested_size} ölçüsü bu ölkədə "
+                    "mövcud deyil ❌"
                 )
-
-            if size_match_method:
+            else:
                 lines.append(
-                    f"   Uyğunlaşdırma: "
-                    f"{size_match_method}"
+                    f"   {requested_size} ölçüsünün stoku "
+                    "yoxlanıla bilmədi ⚠️"
                 )
 
             lines.append(
-                "   Etibarlı olmadığı üçün "
-                "müqayisəyə daxil edilmədi."
+                "   Qiymət müqayisəsinə "
+                "daxil edilmədi."
             )
 
             continue
