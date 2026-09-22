@@ -41,7 +41,7 @@ LAST_SIZE_FILE = (
     / "last_requested_size.txt"
 )
 
-HEADLESS = True
+HEADLESS = False
 
 SCRIPT_VERSION = (
     "2026-08-21-CLOUD-HEADLESS-V20"
