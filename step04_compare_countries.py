@@ -1,4 +1,5 @@
 import csv
+import os
 import json
 import re
 import time
@@ -41,10 +42,10 @@ LAST_SIZE_FILE = (
     / "last_requested_size.txt"
 )
 
-HEADLESS = False
+HEADLESS = True
 
 SCRIPT_VERSION = (
-    "2026-08-21-CLOUD-HEADLESS-V20"
+    "2026-09-21-CLOUD-STARTUP-V21"
 )
 
 
@@ -6076,13 +6077,6 @@ def scrape_country(
         )
 
         if not product_available:
-            print(f"DEBUG {country_code} HTTP: {status_code}", flush=True)
-            print(f"DEBUG {country_code} URL: {final_url}", flush=True)
-            print(f"DEBUG {country_code} TITLE: {page.title()}", flush=True)
-            print(f"DEBUG {country_code} BODY: {body_text[:1500]!r}", flush=True)
-
-
-            
             return empty_result(
                 country_code=country_code,
                 country_name=country_name,
@@ -6401,6 +6395,18 @@ def scrape_country_in_own_browser(
 # MAIN
 # ============================================================
 
+def get_country_worker_count() -> int:
+    """Cloud yaddaşına uyğun paralel brauzer sayını seçir."""
+    value = os.getenv("MANGO_COUNTRY_WORKERS", "3")
+    try:
+        count = int(value)
+    except ValueError as error:
+        raise ValueError("MANGO_COUNTRY_WORKERS 1, 2 və ya 3 olmalıdır.") from error
+    if not 1 <= count <= 3:
+        raise ValueError("MANGO_COUNTRY_WORKERS 1, 2 və ya 3 olmalıdır.")
+    return min(count, len(COUNTRIES))
+
+
 def main() -> None:
     """
     Telegram subprocess üçün sürətli əsas hissə.
@@ -6482,12 +6488,7 @@ def main() -> None:
 
     results_by_country = {}
 
-    max_workers = min(
-        3,
-        len(
-            COUNTRIES
-        ),
-    )
+    max_workers = get_country_worker_count()
 
     with ThreadPoolExecutor(
         max_workers=max_workers
