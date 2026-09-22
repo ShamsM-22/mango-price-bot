@@ -65,6 +65,7 @@ ERROR_LOG_FILE = (
 
 
 STEP_FILES = {
+    "setup": PROJECT_FOLDER / "step07_database.py",
     "compare": (
         PROJECT_FOLDER
         / "step04_compare_countries.py"
@@ -196,71 +197,21 @@ ENV_FILE = (
 
 
 def read_telegram_token() -> str:
-    """
-    Telegram tokenini həm lokal, həm də cloud mühitində oxuyur.
-
-    Prioritet:
-    1) Railway / OS environment variable
-    2) Lokal .env faylı
-    """
-
-    token = os.getenv(
-        "TELEGRAM_BOT_TOKEN",
-        "",
-    ).strip()
-
-    if token:
-        return token
-
-    env_path = (
-        PROJECT_FOLDER
-        / ".env"
-    )
-
-    if env_path.exists():
-        try:
-            for raw_line in env_path.read_text(
-                encoding="utf-8"
-            ).splitlines():
-                line = raw_line.strip()
-
-                if (
-                    not line
-                    or line.startswith("#")
-                    or "=" not in line
-                ):
-                    continue
-
-                key, value = line.split(
-                    "=",
-                    1,
-                )
-
-                if key.strip() != "TELEGRAM_BOT_TOKEN":
-                    continue
-
-                token = (
-                    value.strip()
-                    .strip('"')
-                    .strip("'")
-                )
-
-                if token:
-                    return token
-
-        except OSError:
-            pass
-
-    raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN tapılmadı. "
-        "Lokal mühitdə .env faylını, "
-        "Railway-də isə bot service -> Variables "
-        "bölməsini yoxla."
-    )
+    """Cloud environment, sonra lokal .env faylından tokeni oxuyur."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token and ENV_FILE.exists():
+        values = dotenv_values(ENV_FILE, encoding="utf-8-sig")
+        token = str(values.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN tapılmadı. "
+            "Lokal .env faylını və ya cloud Variables bölməsini yoxla."
+        )
+    return token
 
 
 
-TELEGRAM_BOT_TOKEN = read_telegram_token()
+
 
 
 # ============================================================
@@ -1573,9 +1524,7 @@ async def handle_text_message(
         await message.reply_text(
             "✅ Link qəbul edildi.\n\n"
             "📏 Məhsulda stokda olan ölçülər "
-            "yoxlanılır...\n\n"
-            "Kompüterdə avtomatik brauzer "
-            "pəncərəsi açıla bilər."
+            "yoxlanılır..."
         )
     )
 
@@ -1613,9 +1562,7 @@ async def handle_text_message(
         await status_message.edit_text(
             "❌ Məhsuldakı ölçülər oxunarkən "
             "xəta baş verdi.\n\n"
-            f"{error_text}\n\n"
-            "Tam xəta məlumatı:\n"
-            "data/telegram_bot_errors.log"
+            "Bir qədər sonra linki yenidən göndər."
         )
 
         return
@@ -1830,9 +1777,7 @@ async def handle_size_callback(
                 "💱 Qiymətlər AZN-ə çevrilir...\n"
                 "📦 Təxmini kargo hesablanır...\n"
                 "💾 Sorğu SQL bazasına yazılır...\n\n"
-                "Bu proses bir qədər çəkə bilər.\n"
-                "Kompüterdə avtomatik brauzer "
-                "pəncərələri açıla bilər."
+                "Bu proses bir qədər çəkə bilər."
             )
         )
 
@@ -1874,9 +1819,7 @@ async def handle_size_callback(
             await processing_message.edit_text(
                 "❌ Məhsul yoxlanarkən "
                 "xəta baş verdi.\n\n"
-                f"{error_text}\n\n"
-                "Tam xəta məlumatı:\n"
-                "data/telegram_bot_errors.log"
+                "Bir qədər sonra linki yenidən göndər."
             )
 
             return
@@ -1936,136 +1879,42 @@ async def error_handler(
 # ============================================================
 
 def main() -> None:
-    """
-    Telegram Mango botunu başladır.
-    """
-
+    """Bazanın hazır olduğunu yoxlayır və Telegram botunu başladır."""
     global BOT_INSTANCE_SOCKET
-
-    BOT_INSTANCE_SOCKET = (
-        acquire_single_instance_lock()
-    )
-
-    if not TELEGRAM_BOT_TOKEN:
-
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN tapılmadı.\n"
-            ".env faylını yoxla."
-        )
-
     check_required_files()
-
-    application = (
-        Application.builder()
-        .token(
-            TELEGRAM_BOT_TOKEN
-        )
-        .build()
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "help",
-            help_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "cancel",
-            cancel_command,
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_size_callback,
-            pattern=r"^size\|",
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
-            handle_text_message,
-        )
-    )
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    print(
-        "=" * 80
-    )
-
-    print(
-        "MANGO TELEGRAM QİYMƏT + ÖLÇÜ BOTU"
-    )
-
-    print(
-        "=" * 80
-    )
-
-    print(
-        "Bot başladıldı."
-    )
-
-    print(
-        "Telegram-da @MangoAzBot botunu aç."
-    )
-
-    print(
-        "Mango məhsul linki göndər."
-    )
-
-    print(
-        "Botu dayandırmaq üçün Ctrl + C bas."
-    )
-
-    print(
-        "Xəta logu:",
-        ERROR_LOG_FILE,
-    )
-
+    token = read_telegram_token()
+    BOT_INSTANCE_SOCKET = acquire_single_instance_lock()
     try:
-        application.run_polling(
-            drop_pending_updates=True
+        # Serverdə baza ilk dəfə yaradılır; mövcud məlumatlar saxlanır.
+        run_python_script(STEP_FILES["setup"])
+        application = (
+            Application.builder()
+            .token(token)
+            # Addımlar ortaq CSV fayllarından istifadə edir.
+            .concurrent_updates(False)
+            .build()
         )
-
-    except InvalidToken:
-        print(
-            "\n❌ Layihədəki .env faylında olan "
-            "Telegram tokeni server tərəfindən qəbul edilmədi."
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("cancel", cancel_command))
+        application.add_handler(
+            CallbackQueryHandler(handle_size_callback, pattern=r"^size\|")
         )
-
-        print(
-            "Yoxlanılan .env faylı:"
+        application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message)
         )
-
-        print(
-            ENV_FILE
-        )
-
-        print(
-            "\n.env faylında yalnız aktiv tokeni saxla:"
-        )
-
-        print(
-            "TELEGRAM_BOT_TOKEN=aktiv_token"
-        )
-
+        application.add_error_handler(error_handler)
+        logger.info("Mango botu Telegram-a qoşulur.")
+        application.run_polling(drop_pending_updates=False)
+    except InvalidToken as error:
+        raise RuntimeError(
+            "Telegram tokeni qəbul edilmədi. "
+            "Cloud Variables və ya lokal .env daxilindəki tokeni yoxla."
+        ) from error
     finally:
         if BOT_INSTANCE_SOCKET is not None:
             BOT_INSTANCE_SOCKET.close()
+            BOT_INSTANCE_SOCKET = None
 
 
 if __name__ == "__main__":
