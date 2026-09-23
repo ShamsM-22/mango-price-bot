@@ -2,6 +2,7 @@ import asyncio
 import csv
 import logging
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -301,23 +302,50 @@ def normalize_yes_no(value) -> str:
     return "Unknown"
 
 
+def extract_mango_product_url(
+    text: str,
+) -> str | None:
+    """
+    Mesajın içindən Mango məhsul URL-ni çıxarır.
+
+    Mango saytından Share -> Telegram zamanı
+    linklə birlikdə məhsul adı və əlavə mətn də
+    gələ bilər. Bot yalnız /p/ olan məhsul linkini
+    götürür və qalan mətni nəzərə almır.
+    """
+
+    if not text:
+        return None
+
+    matches = re.findall(
+        r"https://shop\.mango\.com/"
+        r"[^\s<>\[\]\(\)\{\}\"']+",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    for match in matches:
+        candidate = match.rstrip(
+            ".,;:!?)]}>"
+        )
+
+        if "/p/" in candidate.lower():
+            return candidate
+
+    return None
+
+
 def is_mango_product_url(
     text: str,
 ) -> bool:
     """
-    Mətnin Mango məhsul linki
+    Mətndə düzgün Mango məhsul linkinin
     olub-olmadığını yoxlayır.
     """
 
-    clean_value = (
-        text.strip().lower()
-    )
-
     return (
-        clean_value.startswith(
-            "https://shop.mango.com/"
-        )
-        and "/p/" in clean_value
+        extract_mango_product_url(text)
+        is not None
     )
 
 
@@ -1153,26 +1181,6 @@ def build_result_message(
                 "daha bahadır"
             )
 
-    lines.extend(
-        [
-            "",
-            (
-                "ℹ️ Ayaqqabıda ölçü uyğunluğu Mango "
-                "səhifəsində göstərilən EUR qarşılığına "
-                "əsasən hesablanır."
-            ),
-            (
-                "Ən münasib seçim yalnız uyğun "
-                "lokal ölçünün stokda olduğu "
-                "ölkələr arasında hesablanıb."
-            ),
-            (
-                "Kargo məhsul növü və təxmini "
-                "bağlama çəkisinə əsasən hesablanıb."
-            ),
-        ]
-    )
-
     return "\n".join(
         lines
     )
@@ -1472,13 +1480,39 @@ async def handle_text_message(
     ):
         return
 
-    product_url = (
-        message.text.strip()
-    )
+    message_sources = [
+        message.text
+    ]
 
-    if not is_mango_product_url(
-        product_url
+    # Telegram text_link entity ilə gizli URL
+    # göndəribsə onu da yoxlayır.
+    for entity in (
+        message.entities
+        or []
     ):
+        entity_url = getattr(
+            entity,
+            "url",
+            None,
+        )
+
+        if entity_url:
+            message_sources.append(
+                entity_url
+            )
+
+    product_url = ""
+
+    for source_text in message_sources:
+        found_url = extract_mango_product_url(
+            source_text
+        )
+
+        if found_url:
+            product_url = found_url
+            break
+
+    if not product_url:
 
         await message.reply_text(
             "❌ Bu, düzgün Mango məhsul "
@@ -1755,18 +1789,6 @@ async def handle_size_callback(
 
     async with WORKFLOW_LOCK:
 
-        processing_message = (
-            await query.message.reply_text(
-                "🔍 Ölkələr üzrə qiymətlər və "
-                "uyğun lokal ölçülərin stoku "
-                "yoxlanılır...\n"
-                "💱 Qiymətlər AZN-ə çevrilir...\n"
-                "📦 Təxmini kargo hesablanır...\n"
-                "💾 Sorğu SQL bazasına yazılır...\n\n"
-                "Bu proses bir qədər çəkə bilər."
-            )
-        )
-
         await context.bot.send_chat_action(
             chat_id=chat.id,
             action=ChatAction.TYPING,
@@ -1802,18 +1824,13 @@ async def handle_size_callback(
                     error_text[-3000:]
                 )
 
-            await processing_message.edit_text(
+            await query.message.reply_text(
                 "❌ Məhsul yoxlanarkən "
                 "xəta baş verdi.\n\n"
                 "Bir qədər sonra linki yenidən göndər."
             )
 
             return
-
-        await processing_message.edit_text(
-            "✅ Hesablama tamamlandı.\n"
-            "Nəticə aşağıdadır."
-        )
 
         await send_long_message(
             query.message,
