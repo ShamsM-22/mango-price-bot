@@ -37,10 +37,10 @@ CACHE_FILE = Path(
 )
 
 CACHE_TTL_HOURS = 24
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
 
 SCRIPT_VERSION = (
-    "2026-09-23-CARGO-OPEN-RANGE-V3"
+    "2026-09-23-CARGO-TR-ROUTE-V4"
 )
 
 
@@ -70,6 +70,12 @@ COUNTRY_ALIASES = {
         "Turkiye",
         "Türkiyə",
         "Türkiyədən çatdırılma",
+        "İstanbul",
+        "Istanbul",
+        "Türkiyə · İstanbul",
+        "Türkiye · İstanbul",
+        "Turkiye Istanbul",
+        "Turkey Istanbul",
     ],
 
     "ES": [
@@ -1312,6 +1318,84 @@ def choose_country(
     )
 
 
+def choose_country_with_retry(
+    page: Page,
+    country_code: str,
+    timeout_ms: int = 5_000,
+) -> bool:
+    """
+    Dinamik səhifələrdə ölkə seçimi dərhal hazır olmaya bilər.
+    Xüsusilə Expargo Türkiyə marşrutunu "İstanbul" kimi göstərir.
+    Ona görə ölkə elementi görünənədək qısa retry edilir.
+    """
+
+    deadline = (
+        time.perf_counter()
+        + timeout_ms / 1000
+    )
+
+    while time.perf_counter() < deadline:
+        try:
+            if choose_country(
+                page,
+                country_code,
+            ):
+                return True
+        except Exception:
+            pass
+
+        page.wait_for_timeout(
+            250
+        )
+
+    return False
+
+
+def wait_for_country_tariffs(
+    page: Page,
+    country_code: str,
+    timeout_ms: int = 8_000,
+) -> bool:
+    """
+    Tariflər AJAX/JS ilə sonradan gəlirsə, uyğun ölkə üçün
+    real çəki intervalı görünənədək gözləyir.
+    """
+
+    deadline = (
+        time.perf_counter()
+        + timeout_ms / 1000
+    )
+
+    while time.perf_counter() < deadline:
+        try:
+            page_text = page.locator(
+                "body"
+            ).inner_text()
+
+            country_section = (
+                get_country_section(
+                    page_text,
+                    country_code,
+                )
+            )
+
+            ranges = find_weight_ranges(
+                country_section
+            )
+
+            if ranges:
+                return True
+
+        except Exception:
+            pass
+
+        page.wait_for_timeout(
+            300
+        )
+
+    return False
+
+
 # ============================================================
 # PUL DƏYƏRLƏRİNİN OXUNMASI
 # ============================================================
@@ -2234,14 +2318,30 @@ def get_rate_from_source(
                 page
             )
 
-            choose_country(
-                page,
-                country_code,
+            country_selected = (
+                choose_country_with_retry(
+                    page,
+                    country_code,
+                    timeout_ms=5_000,
+                )
             )
 
-            page.wait_for_timeout(
-                450
-            )
+            # Expargo tarif cədvəlini JS ilə sonradan yükləyir.
+            # Türkiyə istiqaməti orada "İstanbul" kimi təqdim olunur.
+            if source_number == 1:
+                wait_for_country_tariffs(
+                    page,
+                    country_code,
+                    timeout_ms=8_000,
+                )
+            elif country_selected:
+                page.wait_for_timeout(
+                    700
+                )
+            else:
+                page.wait_for_timeout(
+                    1_000
+                )
 
             page_text = page.locator(
                 "body"
