@@ -37,9 +37,10 @@ CACHE_FILE = Path(
 )
 
 CACHE_TTL_HOURS = 24
+CACHE_SCHEMA_VERSION = 3
 
 SCRIPT_VERSION = (
-    "2026-08-18-SPEED-CACHE-V2"
+    "2026-09-23-CARGO-OPEN-RANGE-V3"
 )
 
 
@@ -460,7 +461,7 @@ def build_exchange_rates(
 
 def _empty_cache() -> dict:
     return {
-        "version": 2,
+        "version": CACHE_SCHEMA_VERSION,
         "tariff_ranges": {},
         "estimated_rates": {},
     }
@@ -490,10 +491,24 @@ def load_cargo_cache() -> dict:
     ):
         return _empty_cache()
 
-    data.setdefault(
-        "version",
-        2,
-    )
+    try:
+        cache_version = int(
+            data.get(
+                "version",
+                0,
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return _empty_cache()
+
+    # Parser qaydaları dəyişəndə köhnə, səhv tarifləri
+    # avtomatik yenidən istifadə etməmək üçün cache sıfırlanır.
+    if cache_version != CACHE_SCHEMA_VERSION:
+        return _empty_cache()
 
     data.setdefault(
         "tariff_ranges",
@@ -786,8 +801,8 @@ def bootstrap_rate_from_previous_output(
     int,
 ] | None:
     """
-    Yeni SPEED script ilk dəfə işə düşəndə əvvəlki uğurlu
-    final_price_comparison.csv nəticəsindən istifadə edə bilir.
+    Legacy helper. CARGO V3-də normal hesablama axınında istifadə edilmir,
+    çünki köhnə parser nəticəsini yenidən cache-ə qaytara bilər.
 
     Fayl 24 saatdan köhnədirsə istifadə edilmir.
     """
@@ -898,44 +913,106 @@ def extract_rate_from_ranges(
     exchange_rates: dict[str, float],
 ) -> float:
     """
-    Cache-dəki tarif intervallarından cari çəkinin qiymətini hesablayır.
+    Tarif intervallarından cari çəkinin qiymətini hesablayır.
+
+    Dəstəklənən iki model:
+    - fixed: interval üçün sabit məbləğ
+    - per_kg: açıq intervalda hər kq üçün tarif
     """
+
+    def calculate_range_cost(
+        weight_range: dict,
+    ) -> float:
+        amount = float(
+            weight_range[
+                "amount"
+            ]
+        )
+
+        currency = str(
+            weight_range[
+                "currency"
+            ]
+        ).upper()
+
+        billing_mode = str(
+            weight_range.get(
+                "billing_mode",
+                "fixed",
+            )
+        ).lower()
+
+        if billing_mode == "per_kg":
+            amount = (
+                amount
+                * float(weight_kg)
+            )
+
+        return convert_to_azn(
+            amount=amount,
+            currency=currency,
+            exchange_rates=(
+                exchange_rates
+            ),
+        )
+
+    parsed_ranges = []
+
+    for weight_range in ranges:
+        try:
+            minimum = float(
+                weight_range[
+                    "minimum"
+                ]
+            )
+
+            raw_maximum = weight_range.get(
+                "maximum"
+            )
+
+            maximum = (
+                None
+                if raw_maximum is None
+                else float(raw_maximum)
+            )
+
+            # amount/currency burada da yoxlanır ki
+            # yarımçıq cache sətri seçimə düşməsin.
+            float(
+                weight_range[
+                    "amount"
+                ]
+            )
+            str(
+                weight_range[
+                    "currency"
+                ]
+            )
+
+        except (
+            TypeError,
+            ValueError,
+            KeyError,
+        ):
+            continue
+
+        parsed_ranges.append(
+            (
+                minimum,
+                maximum,
+                weight_range,
+            )
+        )
 
     for tolerance in (
         0.0,
         0.005,
     ):
-        for weight_range in ranges:
-            try:
-                minimum = float(
-                    weight_range[
-                        "minimum"
-                    ]
-                )
-
-                maximum = float(
-                    weight_range[
-                        "maximum"
-                    ]
-                )
-
-                amount = float(
-                    weight_range[
-                        "amount"
-                    ]
-                )
-
-                currency = str(
-                    weight_range[
-                        "currency"
-                    ]
-                ).upper()
-
-            except (
-                TypeError,
-                ValueError,
-                KeyError,
-            ):
+        # Əvvəl qapalı intervalları yoxlayırıq.
+        # Beləliklə düz 1.00 kq həm 0.75-1 kq,
+        # həm də 1 kq+ kimi görünərsə qapalı interval seçilir.
+        for minimum, maximum, weight_range in parsed_ranges:
+            if maximum is None:
                 continue
 
             if (
@@ -943,12 +1020,18 @@ def extract_rate_from_ranges(
                 <= weight_kg
                 <= maximum + tolerance
             ):
-                return convert_to_azn(
-                    amount=amount,
-                    currency=currency,
-                    exchange_rates=(
-                        exchange_rates
-                    ),
+                return calculate_range_cost(
+                    weight_range
+                )
+
+        # Sonra 1 kq+, 1 kq və üzəri və s. açıq intervallar.
+        for minimum, maximum, weight_range in parsed_ranges:
+            if maximum is not None:
+                continue
+
+            if weight_kg >= minimum - tolerance:
+                return calculate_range_cost(
+                    weight_range
                 )
 
     raise RuntimeError(
@@ -997,8 +1080,7 @@ def wait_for_cargo_page_ready(
         except Exception:
             pass
 
-        page.wait_for_timeout(
-            150
+        page.wait_for_timeout(            150
         )
 
 
@@ -1347,8 +1429,12 @@ def find_weight_ranges(
     page_text: str,
 ) -> list[dict]:
     """
-    Kiloqram və qram ilə yazılmış tarif
-    intervallarını tapır.
+    Kiloqram və qram ilə yazılmış tarif intervallarını tapır.
+
+    Həm qapalı intervalları (məs. 0.75-1 kq),
+    həm də açıq intervalları (məs. 1 kq+, 1 kq və üzəri)
+    tanıyır. Açıq intervalda "hər kq" / "/kg" kimi qeyd
+    varsa tarif per_kg kimi saxlanılır.
     """
 
     clean_text = re.sub(
@@ -1405,6 +1491,23 @@ def find_weight_ranges(
         ),
     ]
 
+    # 1 kq +, 1 kg+, 1 kq və üzəri, 1 kg ve üzeri,
+    # 1 kg and above / or more kimi formalar.
+    open_range_pattern = re.compile(
+        r"(?P<min>\d+(?:[.,]\d+)?)"
+        r"\s*(?:kg|kq)\s*"
+        r"(?:"
+        r"\+"
+        r"|və\s+(?:üzəri|yuxarı)"
+        r"|ve\s+(?:üzeri|uzeri|yukarı|yukari)"
+        r"|(?:və|ve)?\s*(?:üzəri|üzeri|uzeri)"
+        r"|and\s+(?:above|over|up)"
+        r"|or\s+more"
+        r"|(?:-?dan|-?dən)\s+(?:yuxarı|yuxari|çox|cox)"
+        r")",
+        re.IGNORECASE,
+    )
+
     matches = []
 
     for pattern, multiplier in range_patterns:
@@ -1428,8 +1531,29 @@ def find_weight_ranges(
                     "end": match.end(),
                     "minimum": minimum * multiplier,
                     "maximum": maximum * multiplier,
+                    "open_ended": False,
                 }
             )
+
+    for match in open_range_pattern.finditer(
+        clean_text
+    ):
+        minimum = parse_number(
+            match.group("min")
+        )
+
+        if minimum is None:
+            continue
+
+        matches.append(
+            {
+                "start": match.start(),
+                "end": match.end(),
+                "minimum": minimum,
+                "maximum": None,
+                "open_ended": True,
+            }
+        )
 
     matches.sort(
         key=lambda item: item["start"]
@@ -1443,10 +1567,20 @@ def find_weight_ranges(
                 existing["minimum"]
                 - item["minimum"]
             ) < 0.0001
-            and abs(
-                existing["maximum"]
-                - item["maximum"]
-            ) < 0.0001
+            and (
+                (
+                    existing["maximum"] is None
+                    and item["maximum"] is None
+                )
+                or (
+                    existing["maximum"] is not None
+                    and item["maximum"] is not None
+                    and abs(
+                        existing["maximum"]
+                        - item["maximum"]
+                    ) < 0.0001
+                )
+            )
             and abs(
                 existing["start"]
                 - item["start"]
@@ -1474,12 +1608,15 @@ def find_weight_ranges(
         else:
             next_start = min(
                 len(clean_text),
-                item["end"] + 350,
+                item["end"] + 220,
             )
 
+        # Tarifi interval etiketinə mümkün qədər yaxın saxlayırıq.
+        # Beləliklə səhifənin sonrakı hissəsindəki başqa AZN məbləği
+        # təsadüfən kargo tarifi kimi seçilmir.
         segment = clean_text[
             item["end"]:next_start
-        ]
+        ][:180]
 
         money_values = extract_money_values(
             segment
@@ -1494,12 +1631,43 @@ def find_weight_ranges(
 
         amount, currency = chosen_value
 
+        normalized_segment = normalize_text(
+            segment
+        )
+
+        per_kg_markers = (
+            "/kg",
+            "/ kg",
+            "/kq",
+            "/ kq",
+            "per kg",
+            "per kq",
+            "hər kq",
+            "her kq",
+            "hər kg",
+            "her kg",
+            "kq üçün",
+            "kq ucun",
+            "kg üçün",
+            "kg ucun",
+        )
+
+        is_per_kg = any(
+            marker in normalized_segment
+            for marker in per_kg_markers
+        )
+
         results.append(
             {
                 "minimum": item["minimum"],
                 "maximum": item["maximum"],
                 "amount": amount,
                 "currency": currency,
+                "billing_mode": (
+                    "per_kg"
+                    if item["open_ended"] and is_per_kg
+                    else "fixed"
+                ),
             }
         )
 
@@ -1617,7 +1785,10 @@ def extract_rate_for_weight(
     exchange_rates: dict[str, float],
 ) -> float:
     """
-    Məhsulun çəkisinə uyğun tarif intervalını seçir.
+    Məhsulun çəkisinə uyğun tarifi seçir.
+
+    Hesablama eyni qaydanı həm canlı səhifə,
+    həm də cache üçün istifadə edir.
     """
 
     country_section = get_country_section(
@@ -1629,44 +1800,10 @@ def extract_rate_for_weight(
         country_section
     )
 
-    for weight_range in ranges:
-        minimum = weight_range[
-            "minimum"
-        ]
-
-        maximum = weight_range[
-            "maximum"
-        ]
-
-        if minimum <= weight_kg <= maximum:
-            return convert_to_azn(
-                amount=weight_range["amount"],
-                currency=weight_range["currency"],
-                exchange_rates=exchange_rates,
-            )
-
-    for weight_range in ranges:
-        minimum = weight_range[
-            "minimum"
-        ]
-
-        maximum = weight_range[
-            "maximum"
-        ]
-
-        if (
-            minimum - 0.005
-            <= weight_kg
-            <= maximum + 0.005
-        ):
-            return convert_to_azn(
-                amount=weight_range["amount"],
-                currency=weight_range["currency"],
-                exchange_rates=exchange_rates,
-            )
-
-    raise RuntimeError(
-        f"{weight_kg:.2f} kq üçün uyğun tarif tapılmadı."
+    return extract_rate_from_ranges(
+        ranges=ranges,
+        weight_kg=weight_kg,
+        exchange_rates=exchange_rates,
     )
 
 
@@ -1746,14 +1883,129 @@ def find_weight_input(
     return None
 
 
+def extract_calculator_money_value(
+    changed_lines: list[str],
+) -> tuple[float, str] | None:
+    """
+    Kalkulyator nəticəsindən yalnız çatdırılma qiyməti ilə
+    əlaqəli sətrlərdəki pul məbləğini qəbul edir.
+
+    Məqsəd: səhifədə sonradan görünən endirim, balans,
+    minimum ödəniş və s. rəqəmlərin kargo kimi götürülməməsi.
+    """
+
+    result_keywords = [
+        "delivery",
+        "shipping",
+        "cargo",
+        "kargo",
+        "çatdırılma",
+        "catdirilma",
+        "daşınma",
+        "dasinma",
+        "cost",
+        "price",
+        "qiymət",
+        "qiymet",
+        "məbləğ",
+        "mebleg",
+        "total",
+        "yekun",
+    ]
+
+    relevant_lines = []
+
+    for index, line in enumerate(
+        changed_lines
+    ):
+        normalized_line = normalize_text(
+            line
+        )
+
+        if not any(
+            normalize_text(keyword)
+            in normalized_line
+            for keyword in result_keywords
+        ):
+            continue
+
+        start = max(
+            0,
+            index - 1,
+        )
+
+        end = min(
+            len(changed_lines),
+            index + 3,
+        )
+
+        relevant_lines.extend(
+            changed_lines[
+                start:end
+            ]
+        )
+
+    if not relevant_lines:
+        return None
+
+    # Sıralamanı saxlayaraq təkrarlanan sətrləri çıxarırıq.
+    unique_lines = list(
+        dict.fromkeys(
+            relevant_lines
+        )
+    )
+
+    money_values = extract_money_values(
+        "\n".join(
+            unique_lines
+        )
+    )
+
+    if not money_values:
+        return None
+
+    unique_money_values = []
+
+    for amount, currency in money_values:
+        value = (
+            round(
+                float(amount),
+                4,
+            ),
+            str(currency).upper(),
+        )
+
+        if value not in unique_money_values:
+            unique_money_values.append(
+                value
+            )
+
+    # Eyni nəticə blokunda bir neçə fərqli AZN məbləği varsa
+    # hansının çatdırılma haqqı olduğunu təxmin etmirik.
+    azn_values = [
+        value
+        for value in unique_money_values
+        if value[1] == "AZN"
+    ]
+
+    if len(azn_values) > 1:
+        return None
+
+    return choose_money_value(
+        unique_money_values
+    )
+
+
 def try_calculator(
     page: Page,
     weight_kg: float,
     exchange_rates: dict[str, float],
 ) -> float | None:
     """
-    Tarif cədvəli olmadıqda kalkulyatoru
-    doldurmağa çalışır.
+    Tarif cədvəli olmadıqda kalkulyatoru doldurmağa çalışır.
+
+    Nəticə yalnız çatdırılma qiyməti olduğu aydın olan
+    dəyişmiş sətrlərdən götürülür. Şübhəli nəticə qəbul edilmir.
     """
 
     weight_input = find_weight_input(
@@ -1786,6 +2038,8 @@ def try_calculator(
         "Hesapla",
     ]
 
+    clicked = False
+
     for name in calculate_names:
         try:
             button = page.get_by_role(
@@ -1803,10 +2057,14 @@ def try_calculator(
                     timeout=2_000
                 )
 
+                clicked = True
                 break
 
         except Exception:
             continue
+
+    if not clicked:
+        return None
 
     page.wait_for_timeout(
         800
@@ -1829,16 +2087,10 @@ def try_calculator(
         and line.strip() not in before_lines
     ]
 
-    candidate_text = "\n".join(
-        changed_lines
-    )
-
-    money_values = extract_money_values(
-        candidate_text
-    )
-
-    chosen_value = choose_money_value(
-        money_values
+    chosen_value = (
+        extract_calculator_money_value(
+            changed_lines
+        )
     )
 
     if chosen_value is None:
@@ -1921,10 +2173,10 @@ def get_rate_from_source(
     """
     Bir tarif mənbəyindən kargo qiyməti götürür.
 
-    SPEED V2 prioriteti:
-    1. 24 saatlıq bütün tarif intervalı cache
-    2. canlı səhifə
-    3. kalkulyator fallback
+    CARGO V3 prioriteti:
+    1. Cari parser versiyasının tarif cache-i
+    2. Canlı səhifədə tarif intervalları
+    3. Yalnız etibarlı nəticə verən kalkulyator fallback
     """
 
     cached_ranges = (
@@ -1996,8 +2248,7 @@ def get_rate_from_source(
             ).inner_text()
 
             country_section = (
-                get_country_section(
-                    page_text,
+                get_country_section(page_text,
                     country_code,
                 )
             )
@@ -2075,11 +2326,11 @@ def calculate_estimated_shipping(
     """
     Mövcud tariflərin ortalamasını hesablayır.
 
-    SPEED V2:
+    CARGO V3:
     - AZ həmişə 0
-    - eyni ölkə + çəki son 24 saatda hesablanıbsa dərhal cache
-    - əvvəlki final CSV-də bugünkü nəticə varsa ilk run-da bootstrap
-    - əks halda source-level tariff range cache/live lookup
+    - yalnız cari parser versiyasının cache-i istifadə olunur
+    - köhnə final CSV-dən kargo bootstrap edilmir
+    - cache yoxdursa source-level canlı tarif yoxlanılır
     """
 
     if country_code == "AZ":
@@ -2098,21 +2349,6 @@ def calculate_estimated_shipping(
         )
 
         return cached_estimate
-
-    previous_estimate = (
-        bootstrap_rate_from_previous_output(
-            country_code=country_code,
-            weight_kg=weight_kg,
-        )
-    )
-
-    if previous_estimate is not None:
-        print(
-            "   Kargo əvvəlki son nəticədən "
-            "cache-ləndi ⚡"
-        )
-
-        return previous_estimate
 
     live_rates = []
 
@@ -2966,11 +3202,10 @@ def main() -> None:
     )
 
     print(
-        f"Step06 SPEED V2 ümumi vaxt: "
+        f"Step06 CARGO V3 ümumi vaxt: "
         f"{time.perf_counter() - step_started:.2f} saniyə"
     )
 
 
 if __name__ == "__main__":
     main()
-    
